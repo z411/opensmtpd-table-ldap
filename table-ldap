@@ -1,0 +1,98 @@
+#!/bin/sh
+
+if [ -z "$_LOGGING" ]; then
+  _LOGGING=1 "$0" "$@" | tee -a /tmp/custom.log
+  exit $?
+fi
+
+ldaphost="ldaps://example.com"
+binddn="cn=bind,dc=example,dc=com"
+bindpw="VERYSECRET"
+bindbase="ou=users,dc=example,dc=com"
+bindfilter="(&(mail=%s)(memberOf=cn=mail_users,ou=groups,dc=example,dc=com))"
+vmail="vmail"
+
+get_lookup() {
+        user="$1"
+        the_filter=$(printf "$bindfilter" "$user")
+
+        ldap search -H "$ldaphost" \
+             -D "$binddn" -w "$bindpw" -b "$bindbase" \
+             "$the_filter" | grep "^dn:" | cut -d' ' -f2- || echo
+}
+
+get_auth() {
+        the_dn="$1"
+        the_pw="$2"
+
+        ldap search -H "$ldaphost" \
+                -D "$the_dn" -w "$the_pw" -b "$the_dn" \
+                "" > /dev/null 2>&1
+}
+
+do_lookup() {
+        [ -z "$1" ] || [ -z $2 ] && return 1
+        token="$1"
+        user="$2"
+
+        dn=$(get_lookup "$user")
+        if [ ! -z "$dn" ]; then
+                echo "lookup-result|$token|found|$vmail"
+        else
+                echo "lookup-result|$token|found|nonexistent"
+        fi
+}
+
+do_auth() {
+        [ -z "$1" ] || [ -z "$2" ] && return 1
+
+        token="$1"
+        user="${2%%:*}"
+        passwd="${2#*:}"
+
+        dn=$(get_lookup "$user")
+        if [ -n "$dn" ] && get_auth "$dn" "$passwd"; then
+                echo "check-result|$token|found"
+        else
+                echo "check-result|$token|not-found"
+        fi
+}
+
+do_dir() {
+        [ -z "$1" ] || [ -z "$2" ] && return 1
+        token="$1"
+        user="${2%%@*}"
+        domain="${2#*@}"
+
+        if [ -d "/var/vmail/$domain/$user" ]; then
+                echo "lookup-result|$token|found|$vmail"
+        else
+                echo "lookup-result|$token|found|nonexistent"
+        fi
+}
+
+echo "start" >> /tmp/custom.log
+
+while IFS='|' read -r f1 f2 f3 f4 f5 f6 f7 f8 rest; do
+    echo "<< $f1|$f2|$f3|$f4|$f5|$f6|$f7|f8|$rest" >> /tmp/custom.log
+
+    if [ "$f1" = "config" ] && [ "$f2" = "ready" ]; then
+        echo "register|auth"
+        echo "register|alias"
+        echo "register|ready"
+        continue
+    fi
+    if [ "$f5" = "check" ]; then
+        do_auth "$f7" "$f8" &
+        continue
+    fi
+    if [ "$f5" = "lookup" ]; then
+        case "$f8" in
+                *@?*) do_dir "$f7" "$f8" & ;;
+                *) echo "lookup-result|$f7|not-found" ;;
+        esac
+        continue
+    fi
+done
+
+wait
